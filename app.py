@@ -1,253 +1,248 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+from numpy_financial import pmt, ipmt, ppmt
 
 # Set page config
-st.set_page_config(page_title="ETF Performance Analyzer", layout="wide")
+st.set_page_config(page_title="ETF Leveraged Compounding Simulator", layout="wide")
 
 # Custom styling
 st.markdown("""
 <style>
     .metric {font-size: 1.2rem !important;}
+    .stSlider>div>div>div>div {background: #4f8bf9;}
     .stDataFrame {font-size: 14px;}
     .highlight {background-color: #fffacd; padding: 8px; border-radius: 5px;}
-    .positive {color: #008000;}
-    .negative {color: #FF0000;}
+    .tax-box {border-left: 4px solid #4f8bf9; padding-left: 1rem; margin: 1rem 0;}
 </style>
 """, unsafe_allow_html=True)
 
 # Title
-st.title("📊 ETF Performance Analyzer")
+st.title("🚀 ETF Leveraged Compounding Strategy Simulator")
 
-# Load ETF list
-etf_list = [
-    "MAFANG.NS", "FMCGIETF.NS", "MOGSEC.NS", "TATAGOLD.NS", "GOLDIETF.NS",
-    "GOLDCASE.NS", "HDFCGOLD.NS", "GOLD1.NS", "AXISGOLD.NS", "GOLD360.NS",
-    # ... (add all your ETFs here)
-    "IT.NS", "ITETFADD.NS", "HDFCPVTBAN.NS", "HDFCQUAL.NS", "MONQ50.NS"
-]
+# Input parameters
+with st.sidebar:
+    st.header("💰 Investment Parameters")
+    initial = st.number_input("Initial Capital (₹)", 100000, 10000000, 100000, 10000)
+    leverage = st.slider("Leverage Ratio", 1.0, 3.0, 1.0, 0.1)
+    loan_rate = st.slider("Loan Interest Rate (% p.a.)", 1.0, 20.0, 10.0, 0.1)
+    months = st.slider("Investment Tenure (Months)", 1, 120, 60, 1)
+    
+    st.header("📈 ETF Parameters")
+    etf_type = st.selectbox("ETF Type", [
+        "Equity ETF (12% avg return)", 
+        "Debt ETF (8% avg return)", 
+        "Hybrid ETF (10% avg return)",
+        "Custom"
+    ])
+    
+    if etf_type == "Custom":
+        etf_return = st.slider("Expected ETF Return (% p.a.)", 1.0, 30.0, 12.0, 0.1)
+    else:
+        etf_return = 12.0 if "Equity" in etf_type else (8.0 if "Debt" in etf_type else 10.0)
+    
+    st.header("🧾 Tax Parameters")
+    investor_type = st.selectbox("Investor Type", [
+        "Individual (Equity: 10% LTCG, Debt: Slab)", 
+        "Pvt Ltd (25% flat)", 
+        "Custom"
+    ])
+    
+    if investor_type == "Custom":
+        equity_tax = st.slider("Equity LTCG Tax (%)", 0.0, 30.0, 10.0, 0.1)
+        debt_tax = st.slider("Debt LTCG Tax (%)", 0.0, 30.0, 20.0, 0.1)
+    else:
+        equity_tax = 10.0 if "Individual" in investor_type else 25.0
+        debt_tax = 20.0 if "Individual" in investor_type else 25.0
 
-# Date range selection
-col1, col2 = st.columns(2)
-with col1:
-    start_date = st.date_input("Start Date", datetime.now() - timedelta(days=365*3))
-with col2:
-    end_date = st.date_input("End Date", datetime.now())
+# Calculations
+borrowed = initial * (leverage - 1) if leverage > 1 else 0
+total_investment = initial + borrowed
 
-# Analysis parameters
-st.sidebar.header("Analysis Parameters")
-benchmark = st.sidebar.selectbox("Benchmark Index", ["^NSEI", "^NSEMDCP50", "NIFTY_BANK.NS"])
-risk_free_rate = st.sidebar.slider("Risk-Free Rate (% p.a.)", 0.0, 10.0, 5.0, 0.1)
-min_trading_days = st.sidebar.slider("Minimum Trading Days", 50, 500, 200, 10)
+# Loan EMI Calculation (if applicable)
+if borrowed > 0:
+    rate_per_period = loan_rate / 12 / 100
+    emi = -pmt(rate_per_period, months, borrowed)
+    
+    # Generate loan amortization schedule
+    loan_schedule = []
+    remaining_principal = borrowed
+    for month in range(1, months + 1):
+        interest_payment = -ipmt(rate_per_period, month, months, borrowed)
+        principal_payment = -ppmt(rate_per_period, month, months, borrowed)
+        remaining_principal -= principal_payment
+        loan_schedule.append({
+            "Month": month,
+            "EMI": emi,
+            "Principal": principal_payment,
+            "Interest": interest_payment,
+            "Remaining Principal": remaining_principal
+        })
+    loan_df = pd.DataFrame(loan_schedule)
+    total_loan_interest = loan_df["Interest"].sum()
+else:
+    loan_df = pd.DataFrame()
+    total_loan_interest = 0
 
-# Function to fetch data
-@st.cache_data(ttl=3600)
-def get_etf_data(etfs, start, end):
-    data = yf.download(etfs, start=start, end=end, group_by='ticker')
-    return data
+# ETF Growth Calculation
+monthly_return = etf_return / 12 / 100
+etf_values = []
+dividends_received = 0
 
-# Function to calculate metrics
-def calculate_metrics(price_data):
-    returns = price_data.pct_change().dropna()
-    cum_returns = (1 + returns).cumprod() - 1
+for month in range(1, months + 1):
+    if month == 1:
+        current_value = total_investment * (1 + monthly_return)
+    else:
+        current_value = etf_values[-1] * (1 + monthly_return)
     
-    # Annualized returns
-    annual_returns = (1 + returns.mean())**252 - 1
+    # Simulate quarterly dividend (1% of current value every 3 months)
+    if month % 3 == 0:
+        dividend = current_value * 0.01
+        dividends_received += dividend
+        current_value += dividend  # Reinvest dividend
     
-    # Risk metrics
-    annual_volatility = returns.std() * np.sqrt(252)
-    sharpe_ratio = (annual_returns - risk_free_rate/100) / annual_volatility
-    
-    # Max drawdown
-    rolling_max = price_data.cummax()
-    daily_drawdown = price_data / rolling_max - 1
-    max_drawdown = daily_drawdown.cummin()
-    
-    return {
-        'Annual Return': annual_returns,
-        'Annual Volatility': annual_volatility,
-        'Sharpe Ratio': sharpe_ratio,
-        'Max Drawdown': max_drawdown.iloc[-1],
-        'CAGR': (price_data.iloc[-1]/price_data.iloc[0])**(252/len(price_data)) - 1
-    }
+    etf_values.append(current_value)
 
-try:
-    # Fetch data
-    with st.spinner("Fetching ETF data from Yahoo Finance..."):
-        etf_data = get_etf_data(etf_list, start_date, end_date)
-    
-    # Process data
-    performance_data = []
-    valid_etfs = []
-    
-    for etf in etf_list:
-        try:
-            if etf in etf_data:
-                closes = etf_data[etf]['Close']
-                if len(closes) > min_trading_days:
-                    metrics = calculate_metrics(closes)
-                    metrics['ETF'] = etf
-                    performance_data.append(metrics)
-                    valid_etfs.append(etf)
-        except Exception as e:
-            st.warning(f"Couldn't process {etf}: {str(e)}")
-    
-    if not performance_data:
-        st.error("No valid ETF data found for the selected period.")
-        st.stop()
-    
-    # Create performance DataFrame
-    perf_df = pd.DataFrame(performance_data)
-    perf_df.set_index('ETF', inplace=True)
-    
-    # Add benchmark data
-    benchmark_data = yf.download(benchmark, start=start_date, end=end_date)['Close']
-    bench_metrics = calculate_metrics(benchmark_data)
-    bench_metrics['ETF'] = benchmark
-    bench_df = pd.DataFrame([bench_metrics]).set_index('ETF')
-    perf_df = pd.concat([perf_df, bench_df])
-    
-    # Display results
-    st.subheader("📈 Performance Metrics")
-    
-    # Top performers selection
-    metric_options = ['CAGR', 'Sharpe Ratio', 'Annual Volatility', 'Max Drawdown']
-    sort_metric = st.selectbox("Sort by metric", metric_options, index=0)
-    top_n = st.slider("Number of ETFs to display", 5, 50, 20)
-    
-    # Sort and display
-    sorted_df = perf_df.sort_values(by=sort_metric, ascending=False if sort_metric != 'Max Drawdown' else True)
-    display_df = sorted_df.head(top_n)
-    
-    # Formatting
-    format_dict = {
-        'Annual Return': '{:.1%}',
-        'Annual Volatility': '{:.1%}',
-        'Sharpe Ratio': '{:.2f}',
-        'Max Drawdown': '{:.1%}',
-        'CAGR': '{:.1%}'
-    }
-    
-    st.dataframe(display_df.style.format(format_dict).applymap(
-        lambda x: 'color: green' if isinstance(x, (int, float)) and x > 0 else 'color: red', 
-        subset=['Annual Return', 'CAGR', 'Sharpe Ratio']))
-    
-    # Visualizations
-    st.subheader("📊 Performance Comparison")
-    
-    # Select ETFs to compare
-    selected_etfs = st.multiselect(
-        "Select ETFs for detailed comparison",
-        valid_etfs,
-        default=valid_etfs[:3] if len(valid_etfs) >= 3 else valid_etfs
-    )
-    
-    if selected_etfs:
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-        
-        # Normalized price chart
-        for etf in selected_etfs + [benchmark]:
-            if etf in etf_data:
-                prices = etf_data[etf]['Close'] if etf != benchmark else benchmark_data
-                norm_prices = prices / prices.iloc[0]
-                ax1.plot(norm_prices, label=etf)
-        
-        ax1.set_title("Normalized Price Comparison")
-        ax1.set_ylabel("Growth (1 = Initial Investment)")
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Drawdown chart
-        for etf in selected_etfs:
-            if etf in etf_data:
-                prices = etf_data[etf]['Close']
-                rolling_max = prices.cummax()
-                drawdown = (prices / rolling_max) - 1
-                ax2.plot(drawdown, label=etf)
-        
-        ax2.set_title("Drawdown Analysis")
-        ax2.set_ylabel("Drawdown from Peak")
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        st.pyplot(fig)
-    
-    # Correlation matrix
-    st.subheader("🧩 Correlation Matrix")
-    
-    # Create returns DataFrame
-    returns_df = pd.DataFrame()
-    for etf in selected_etfs:
-        if etf in etf_data:
-            returns_df[etf] = etf_data[etf]['Close'].pct_change().dropna()
-    
-    if not returns_df.empty:
-        corr_matrix = returns_df.corr()
-        
-        fig, ax = plt.subplots(figsize=(10, 8))
-        cax = ax.matshow(corr_matrix, cmap='coolwarm', vmin=-1, vmax=1)
-        fig.colorbar(cax)
-        
-        ax.set_xticks(np.arange(len(corr_matrix.columns)))
-        ax.set_yticks(np.arange(len(corr_matrix.columns)))
-        ax.set_xticklabels(corr_matrix.columns, rotation=90)
-        ax.set_yticklabels(corr_matrix.columns)
-        
-        st.pyplot(fig)
-    
-    # Recommendations
-    st.subheader("💡 ETF Recommendations")
-    
-    # Best by category
-    categories = {
-        "Best Returns": "CAGR",
-        "Best Risk-Adjusted": "Sharpe Ratio",
-        "Lowest Volatility": "Annual Volatility",
-        "Best Drawdown Recovery": "Max Drawdown"
-    }
-    
-    cols = st.columns(len(categories))
-    for i, (title, metric) in enumerate(categories.items()):
-        ascending = metric in ["Annual Volatility", "Max Drawdown"]
-        best = perf_df[perf_df.index != benchmark].sort_values(metric, ascending=ascending).head(1)
-        
-        with cols[i]:
-            st.metric(
-                label=title,
-                value=best.index[0],
-                delta=f"{best[metric].values[0]:.1%}" if '%' in format_dict[metric] else f"{best[metric].values[0]:.2f}"
-            )
-    
-    # Detailed analysis
-    with st.expander("🔍 Analysis Methodology"):
-        st.markdown("""
-        **Metrics Calculated:**
-        1. **CAGR**: Compound Annual Growth Rate
-        2. **Annualized Volatility**: Standard deviation of daily returns × √252
-        3. **Sharpe Ratio**: (Return - Risk-Free Rate) / Volatility
-        4. **Max Drawdown**: Largest peak-to-trough decline
-        
-        **Recommendation Logic:**
-        - Top performers selected based on each metric
-        - Benchmark comparison helps identify relative performance
-        - Correlation matrix helps identify diversification opportunities
-        """)
-    
-except Exception as e:
-    st.error(f"An error occurred: {str(e)}")
-    st.stop()
+final_etf_value = etf_values[-1]
+capital_gain = final_etf_value - total_investment - dividends_received
 
-# Additional analysis
-st.markdown("""
+# Tax Calculation
+holding_years = months / 12
+is_equity = "Equity" in etf_type or etf_return >= 10  # Arbitrary threshold for equity-like returns
+
+if is_equity:
+    if holding_years >= 1:
+        tax_rate = equity_tax  # LTCG
+    else:
+        tax_rate = 15.0 if "Individual" in investor_type else 25.0  # STCG
+else:
+    if holding_years >= 3:
+        tax_rate = debt_tax  # LTCG with indexation
+    else:
+        tax_rate = (30.0 if "Individual" in investor_type else 25.0)  # STCG as per slab
+
+capital_gain_tax = capital_gain * (tax_rate / 100)
+dividend_tax = dividends_received * (10/100)  # Dividend distribution tax (simplified)
+
+if "Pvt Ltd" in investor_type:
+    loan_interest_deduction = total_loan_interest * 0.25
+else:
+    loan_interest_deduction = 0
+
+total_tax = capital_gain_tax + dividend_tax - loan_interest_deduction
+
+# Final Returns
+net_value = final_etf_value - (borrowed + total_loan_interest if borrowed > 0 else 0) - total_tax
+net_gain = net_value - initial
+annualized_return = ((net_value / initial) ** (12/months) - 1) * 100
+
+# Display results
+st.subheader("📊 Investment Summary")
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Invested", f"₹{total_investment:,.0f}", 
+            f"Leverage: {leverage}x" if leverage > 1 else "No leverage")
+col2.metric("Final ETF Value", f"₹{final_etf_value:,.0f}", 
+            f"{etf_return}% p.a.")
+col3.metric("Capital Gain", f"₹{capital_gain:,.0f}", 
+            f"{dividends_received:,.0f} dividends")
+
+if borrowed > 0:
+    st.subheader("🏦 Loan Details")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Loan Amount", f"₹{borrowed:,.0f}")
+    col2.metric("Total Interest Paid", f"₹{total_loan_interest:,.0f}", 
+                f"{loan_rate}% p.a.")
+    col3.metric("Effective Cost", f"₹{borrowed + total_loan_interest:,.0f}")
+
+st.subheader("🧾 Tax Liability")
+with st.container():
+    col1, col2 = st.columns(2)
+    col1.markdown(f"""
+    <div class="tax-box">
+        <h4>Capital Gains Tax</h4>
+        <p>Gain: ₹{capital_gain:,.0f}<br>
+        Holding: {holding_years:.1f} years<br>
+        Tax Rate: {tax_rate}%<br>
+        <strong>Tax: ₹{capital_gain_tax:,.0f}</strong></p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col2.markdown(f"""
+    <div class="tax-box">
+        <h4>Dividend Tax</h4>
+        <p>Dividends: ₹{dividends_received:,.0f}<br>
+        Tax Rate: 10%<br>
+        <strong>Tax: ₹{dividend_tax:,.0f}</strong></p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if "Pvt Ltd" in investor_type:
+        st.markdown(f"""
+        <div class="tax-box">
+            <h4>Loan Interest Deduction</h4>
+            <p>Interest Paid: ₹{total_loan_interest:,.0f}<br>
+            Deduction @25%<br>
+            <strong>Tax Saved: ₹{loan_interest_deduction:,.0f}</strong></p>
+        </div>
+        """, unsafe_allow_html=True)
+
+st.subheader("💸 Final Returns")
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Value", f"₹{final_etf_value:,.0f}")
+col2.metric("Net After Loan & Tax", f"₹{net_value:,.0f}")
+col3.metric("Annualized Return", f"{annualized_return:.1f}%")
+
+# Visualizations
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.plot(range(1, months+1), etf_values, label="ETF Portfolio Value", color='green')
+if borrowed > 0:
+    ax.plot(loan_df["Month"], loan_df["Remaining Principal"], 
+            label="Loan Outstanding", color='red', linestyle='--')
+ax.set_title("ETF Growth vs Loan Repayment")
+ax.set_xlabel("Months")
+ax.set_ylabel("Amount (₹)")
+ax.legend()
+ax.grid(True, alpha=0.3)
+st.pyplot(fig)
+
+# Detailed Breakdown
+with st.expander("📝 Detailed Calculation Methodology"):
+    st.markdown(f"""
+    **ETF Growth Calculation:**
+    - Initial Investment: ₹{initial:,.0f}
+    - Leveraged Amount: ₹{borrowed:,.0f} (Total: ₹{total_investment:,.0f})
+    - Monthly Return: {etf_return}/12 = {monthly_return*100:.2f}%
+    - Dividend Reinvestment: 1% of portfolio value quarterly
+    - Final Value after {months} months: ₹{final_etf_value:,.0f}
+    
+    **Tax Treatment:**
+    - ETF Type: {'Equity' if is_equity else 'Debt'}
+    - Holding Period: {holding_years:.1f} years
+    - Capital Gains Tax: {tax_rate}% on ₹{capital_gain:,.0f} = ₹{capital_gain_tax:,.0f}
+    - Dividend Tax: 10% on ₹{dividends_received:,.0f} = ₹{dividend_tax:,.0f}
+    {"- Loan Interest Deduction: 25% of ₹" + f"{total_loan_interest:,.0f} = ₹{loan_interest_deduction:,.0f}" if "Pvt Ltd" in investor_type else ""}
+    
+    **Net Position:**
+    - Final ETF Value: ₹{final_etf_value:,.0f}
+    - Less: Loan Repayment ₹{borrowed + total_loan_interest:,.0f}
+    - Less: Taxes ₹{total_tax:,.0f}
+    - Net Value: ₹{net_value:,.0f}
+    - Annualized Return: {annualized_return:.1f}%
+    """)
+
+st.markdown(f"""
 <div class="highlight">
-<strong>📌 ETF Selection Tips:</strong>
-1. <strong>Diversify</strong> across uncorrelated ETFs (check correlation matrix)
-2. Consider <strong>risk-adjusted returns</strong> (Sharpe Ratio) not just absolute returns
-3. Check <strong>drawdowns</strong> to understand worst-case scenarios
-4. Compare to <strong>benchmark</strong> to evaluate relative performance
-5. Look for <strong>consistent performers</strong> across multiple metrics
+<strong>💡 Key Strategy Benefits:</strong>
+1. <strong>Compounding Magic:</strong> Reinvesting dividends accelerates growth exponentially
+2. <strong>Tax Efficiency:</strong> ETFs generally have lower expense ratios and tax benefits vs mutual funds
+3. <strong>Leverage Boost:</strong> {leverage}x leverage can magnify returns (but increases risk)
+4. <strong>Automatic Rebalancing:</strong> Index ETFs automatically maintain optimal allocations
+
+<strong>⚠️ Risk Factors:</strong>
+1. Market volatility can erode leveraged positions
+2. Interest rate changes affect loan costs
+3. Tax laws may change affecting LTCG benefits
+4. Dividend yields may vary from projections
 </div>
 """, unsafe_allow_html=True)
